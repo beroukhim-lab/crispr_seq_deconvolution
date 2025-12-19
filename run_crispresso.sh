@@ -1,58 +1,101 @@
 #!/bin/bash
+set -euo pipefail
 
-annotation_file="/Users/smisek/OneDrive/Postdoc/POMT_and_Circumstance/sequencing_competition_assay/12.20.24_h9-NSC_E1/sample_annotation.txt"
-number_of_primer_pairs=$(wc -l < "${annotation_file}" | tr -d '[:space:]')
-input_dir="/Users/smisek/OneDrive/Postdoc/POMT_and_Circumstance/sequencing_competition_assay/12.20.24_h9-NSC_E1/t0/split_reads/"
+usage() {
+    cat <<'EOF'
+Usage: run_crispresso.sh -a <annotation_file> -i <input_dir> [-d docker_image] [-p platform]
 
-# Validate input directory
-if [ ! -d "${input_dir}" ]; then
+Arguments:
+  -a  Path to the sample annotation file (required)
+  -i  Directory containing split FASTQ files (required)
+  -d  Docker image for CRISPResso (default: pinellolab/crispresso2)
+  -p  Platform passed to docker run --platform (default: linux/amd64)
+EOF
+}
+
+annotation_file=""
+input_dir=""
+docker_image="pinellolab/crispresso2"
+docker_platform="linux/amd64"
+
+while getopts ":a:i:d:p:h" opt; do
+    case "${opt}" in
+        a) annotation_file="${OPTARG}" ;;
+        i) input_dir="${OPTARG}" ;;
+        d) docker_image="${OPTARG}" ;;
+        p) docker_platform="${OPTARG}" ;;
+        h) usage; exit 0 ;;
+        *) usage; exit 1 ;;
+    esac
+done
+
+if [[ -z "${annotation_file}" || -z "${input_dir}" ]]; then
+    usage
+    exit 1
+fi
+
+if [[ ! -f "${annotation_file}" ]]; then
+    echo "Error: Annotation file ${annotation_file} does not exist."
+    exit 1
+fi
+
+if [[ ! -d "${input_dir}" ]]; then
     echo "Error: Input directory ${input_dir} does not exist."
     exit 1
 fi
 
+input_dir="${input_dir%/}"
+number_of_primer_pairs=$(wc -l < "${annotation_file}" | tr -d '[:space:]')
+
 # Loop through all primer pairs and run CRISPResso on each file
-for i in $(seq 1 $number_of_primer_pairs); do
-    # Extract data from the annotation file
+for i in $(seq 1 "${number_of_primer_pairs}"); do
     line=$(sed -n "${i}p" "${annotation_file}")
     pair_name=$(echo "$line" | awk '{print $1}')
     amplicon_seq=$(echo "$line" | awk '{print $5}')
     guide_seq=$(echo "$line" | awk '{print $4}')
 
-    # Validate variables
-    if [ -z "$pair_name" ] || [ -z "$amplicon_seq" ] || [ -z "$guide_seq" ]; then
-        echo "Error: Missing data for primer pair at line $i"
+    if [[ -z "${pair_name}" || -z "${amplicon_seq}" || -z "${guide_seq}" ]]; then
+        echo "Error: Missing data for primer pair at line ${i}"
         continue
     fi
 
-    #Now find all files that used that primer pair
-    cd "${input_dir}"
-    find ${pair_name}* > files_to_run.txt
-    num_fastq=$(wc -l < files_to_run.txt | tr -d '[:space:]')
+    files_list=$(mktemp)
 
-    if [ "${num_fastq}" -eq 0 ]; then
-    echo "Error: No files found for primer pair ${pair_name}"
-    continue
+    find "${input_dir}" -maxdepth 1 -type f -name "${pair_name}*" -print > "${files_list}"
+    num_fastq=$(wc -l < "${files_list}" | tr -d '[:space:]')
+
+    if [[ "${num_fastq}" -eq 0 ]]; then
+        echo "No files found for primer pair ${pair_name}. This is not necessarially a bad thing."
+        rm -f "${files_list}"
+        continue
     fi
 
-    for j in $(seq 1 ${num_fastq}); do 
-        fastq=$(sed -n "${j}p" files_to_run.txt | awk '{print $1}')
+    for j in $(seq 1 "${num_fastq}"); do
+        fastq=$(sed -n "${j}p" "${files_list}" | awk '{print $1}')
         fastq_basename=$(basename "$fastq")
-        output_folder="crispresso_output_${fastq_basename}"
+        clean_base="${fastq_basename%.fastq}"
+        clean_base="${clean_base#CRISPResso_on_crisprseq_}"
+        clean_base="${clean_base#crisprseq_}"
+        output_folder="${clean_base}"
 
-        #Skip if not enough reads
         num_lines=$(wc -l < "${fastq}" | tr -d '[:space:]')
-        if [ "${num_lines}" -lt 400 ]; then 
-        echo "Warning: ${fastq} has fewer than 100 variants, skipping"
-        continue
+        if [[ "${num_lines}" -lt 400 ]]; then
+            echo "Warning: ${fastq} has fewer than 100 variants, skipping"
+            continue
         fi
 
-        docker run --platform linux/amd64 -v "${input_dir}:/DATA" \
+        docker run --platform "${docker_platform}" -v "${input_dir}:/DATA" \
             -w /DATA \
-            -i pinellolab/crispresso2 CRISPResso \
+            -i "${docker_image}" CRISPResso \
             -g "${guide_seq}" \
             -r1 "${fastq_basename}" \
             --amplicon_seq "${amplicon_seq}" \
-            -n "${output_folder}"
-    done
-done
+            -n "${output_folder}" \
+            -wc 1 \
+            -w 10 \
+            --exclude_bp_from_left 0 \
+            --exclude_bp_from_right 0
 
+    done
+    rm -f "${files_list}"
+done

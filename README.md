@@ -29,7 +29,7 @@ This script will export a read count df and a read count matrix. You should manu
 
 ### Step 3: Run CRISPresso on all output files
 ```
-run_crispresso.py --annotation annotation.txt --input_dir
+run_crispresso.sh --annotation annotation.txt --input_dir
 ```
 
 
